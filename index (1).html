@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard Dana Penelitian</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐳</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f2f7f6;--card:#fff;--ink:#0d2b33;--mute:#5d7a80;--line:#d5e3e2;--accent:#0f7c8a;--coral:#e8664f;--ok:#2e8b57}
+@media(prefers-color-scheme:dark){:root{--bg:#081a20;--card:#0e2830;--ink:#e6f2f1;--mute:#8fb0b4;--line:#1c4048;--accent:#4cc3d1;--coral:#ff8a73;--ok:#5fcf8f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:'Bricolage Grotesque',system-ui,sans-serif;line-height:1.5}
+.wrap{max-width:1080px;margin:0 auto;padding:24px 16px 56px}
+h1{font-size:clamp(28px,5vw,44px);font-weight:800;margin:0;letter-spacing:-.02em}
+h2{font-size:18px;margin:32px 0 10px}
+.sub{color:var(--mute);margin:4px 0 0}
+.bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:20px 0}
+select{font:inherit;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.stamp{color:var(--mute);font-size:13px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.kpi small{color:var(--mute)}
+.kpi b{display:block;font-size:26px;font-weight:800;margin-top:2px}
+.kpi.main{background:var(--accent);border-color:var(--accent);color:#fff}
+.kpi.main small{color:#d6f3f6}
+.scroll{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600}
+td.n,th.n{text-align:right}
+tr:last-child td{border-bottom:0}
+tr.tot td{font-weight:800}
+.prog{height:10px;background:var(--line);border-radius:5px;overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;background:var(--ok)}
+.err{background:var(--card);border:1px solid var(--coral);border-radius:10px;padding:16px;color:var(--coral)}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🐳 Dashboard Dana Penelitian</h1>
+  <p class="sub">Data diambil langsung dari Google Sheets dan diperbarui otomatis.</p>
+  <div class="bar">
+    <label>Kategori <select id="cat"></select></label>
+    <span class="stamp" id="stamp">Memuat data…</span>
+  </div>
+  <div id="app"></div>
+</div>
+
+<script>
+/* ====== PENGATURAN (ubah di sini kalau perlu) ====== */
+const API_URL = "https://script.google.com/macros/s/AKfycbyZvso3T7KpQbgJE4z7kSqjC4m3p9_T970hx1x7ZQlPO1oLrNub72xAe8KHPFq1L7Xi/exec"; // URL dari Apps Script (lihat Code.gs)
+const TAB_BELANJA = "Belanja";
+const TAB_PEMASUKAN = "Pemasukan";
+const REFRESH_MS = 60000; // cek data baru tiap 60 detik
+// Kata kunci untuk mengenali kolom (huruf kecil, cocok sebagian)
+const KEYS = {
+  belanja:   { item:["item","barang","nama"], kategori:["kategori"], funding:["funding","pendana","sumber"], total:["total","subtotal","harga","biaya","jumlah"], status:["status","beli"] },
+  pemasukan: { kategori:["kategori"], funding:["funding","pendana","sumber"], jumlah:["jumlah","nominal","dana","masuk","total"] }
+};
+/* =================================================== */
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const rp = n => "Rp" + Math.round(n).toLocaleString("id-ID");
+let DATA = null;
+
+function parseCSV(t){
+  const rows=[];let r=[],c="",q=false;
+  for(let i=0;i<t.length;i++){
+    const ch=t[i];
+    if(q){ if(ch=='"'){ if(t[i+1]=='"'){c+='"';i++} else q=false } else c+=ch }
+    else if(ch=='"') q=true;
+    else if(ch==","){ r.push(c); c="" }
+    else if(ch=="\n"||ch=="\r"){ if(ch=="\r"&&t[i+1]=="\n") i++; r.push(c); rows.push(r); r=[]; c="" }
+    else c+=ch;
+  }
+  if(c||r.length){ r.push(c); rows.push(r) }
+  return rows;
+}
+function toNum(v){
+  if(typeof v==="number") return v;
+  let s=String(v||"").replace(/[^\d,.\-]/g,"");
+  if(!s) return 0;
+  s=s.replace(/\./g,"").replace(",",".");
+  const n=parseFloat(s); return isNaN(n)?0:n;
+}
+async function fetchAll(){
+  const res=await fetch(API_URL+"?_="+Date.now());
+  if(!res.ok) throw new Error("Server data tidak merespons (HTTP "+res.status+")");
+  const j=await res.json();
+  if(j.error) throw new Error(j.error);
+  return j;
+}
+function loadTab(all,name){
+  if(!all[name]) throw new Error(`Tab "${name}" tidak ditemukan`);
+  const rows=all[name].filter(r=>r.some(x=>String(x).trim()!==""));
+  const hi=rows.findIndex(r=>r.filter(x=>x.trim()!=="").length>=3);
+  if(hi<0) return {head:[],rows:[]};
+  return {head:rows[hi].map(h=>h.trim()), rows:rows.slice(hi+1)};
+}
+function colIndex(head,keys){
+  const h=head.map(x=>x.toLowerCase());
+  for(const k of keys){ const i=h.findIndex(x=>x.includes(k)); if(i>=0) return i }
+  return -1;
+}
+function mapRows(tab,spec){
+  const idx={}; for(const k in spec) idx[k]=colIndex(tab.head,spec[k]);
+  return tab.rows.map(r=>{
+    const o={}; for(const k in idx) o[k]=idx[k]>=0?(r[idx[k]]||"").trim():"";
+    return o;
+  }).filter(o=>Object.values(o).some(v=>v!==""));
+}
+const isBought = s => /sudah|✔|✅|true|ya|dibeli/i.test(s) && !/belum/i.test(s);
+
+function group(list,key,val){
+  const m={}; list.forEach(o=>{ const k=o[key]||"(tanpa "+key+")"; m[k]=(m[k]||0)+val(o) }); return m;
+}
+function table(head,rows,totalRow){
+  return `<div class="scroll"><table><thead><tr>${head.map((h,i)=>`<th class="${i?'n':''}">${esc(h)}</th>`).join("")}</tr></thead><tbody>`
+   +rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i?'n':''}">${esc(c)}</td>`).join("")}</tr>`).join("")
+   +(totalRow?`<tr class="tot">${totalRow.map((c,i)=>`<td class="${i?'n':''}">${esc(c)}</td>`).join("")}</tr>`:"")
+   +`</tbody></table></div>`;
+}
+function render(){
+  const {bel,pem}=DATA, cat=$("cat").value;
+  const fb=cat?bel.filter(o=>o.kategori===cat):bel;
+  const fp=cat?pem.filter(o=>o.kategori===cat):pem;
+  const masuk=fp.reduce((a,o)=>a+toNum(o.jumlah),0);
+  const belanja=fb.reduce((a,o)=>a+toNum(o.total),0);
+  const bought=fb.filter(o=>isBought(o.status)).length;
+  const pct=fb.length?Math.round(bought/fb.length*100):0;
+  const cats=[...new Set([...bel,...pem].map(o=>o.kategori).filter(Boolean))];
+
+  const catRows=cats.map(k=>{
+    const m=pem.filter(o=>o.kategori===k).reduce((a,o)=>a+toNum(o.jumlah),0);
+    const b=bel.filter(o=>o.kategori===k).reduce((a,o)=>a+toNum(o.total),0);
+    return [k,rp(m),rp(b)];
+  });
+  const fMasuk=group(fp,"funding",o=>toNum(o.jumlah)), fBel=group(fb,"funding",o=>toNum(o.total));
+  const fundings=[...new Set([...Object.keys(fMasuk),...Object.keys(fBel)])];
+  const fRows=fundings.map(f=>[f,rp(fMasuk[f]||0),rp(fBel[f]||0)]);
+  const top=[...fb].sort((a,b)=>toNum(b.total)-toNum(a.total)).slice(0,5).map((o,i)=>[i+1+". "+o.item,o.funding,rp(toNum(o.total))]);
+
+  $("app").innerHTML=`
+  <div class="kpis">
+    <div class="kpi main"><small>Dana masuk</small><b>${rp(masuk)}</b></div>
+    <div class="kpi"><small>Total belanja</small><b>${rp(belanja)}</b></div>
+    <div class="kpi"><small>Selisih dana masuk − belanja</small><b>${rp(masuk-belanja)}</b></div>
+    <div class="kpi"><small>Progress belanja (${bought} dari ${fb.length} item)</small><b>${pct}%</b><div class="prog"><i style="width:${pct}%"></i></div></div>
+  </div>
+  <h2>Ringkasan per kategori</h2>${table(["Kategori","Dana masuk","Belanja"],catRows)}
+  <div class="two">
+    <div><h2>Ringkasan per funding${cat?` · ${esc(cat)}`:""}</h2>${table(["Funding","Dana masuk","Belanja"],fRows)}</div>
+    <div><h2>5 belanja terbesar${cat?` · ${esc(cat)}`:""}</h2>${table(["Item","Funding","Total"],top)}</div>
+  </div>
+  <h2>Daftar belanja${cat?` · ${esc(cat)}`:""}</h2>
+  ${table(["Item","Funding","Status","Total"],fb.map(o=>[o.item,o.funding,isBought(o.status)?"Sudah dibeli":"Belum dibeli",rp(toNum(o.total))]),["Total","","",rp(belanja)])}`;
+}
+async function load(){
+  try{
+    const all=await fetchAll(); const b=loadTab(all,TAB_BELANJA), p=loadTab(all,TAB_PEMASUKAN);
+    DATA={bel:mapRows(b,KEYS.belanja),pem:mapRows(p,KEYS.pemasukan)};
+    const sel=$("cat"), cur=sel.value;
+    const cats=[...new Set([...DATA.bel,...DATA.pem].map(o=>o.kategori).filter(Boolean))];
+    sel.innerHTML=`<option value="">Semua kategori</option>`+cats.map(c=>`<option ${c===cur?"selected":""}>${esc(c)}</option>`).join("");
+    render();
+    $("stamp").textContent="Diperbarui "+new Date().toLocaleTimeString("id-ID");
+  }catch(e){
+    $("stamp").textContent="";
+    $("app").innerHTML=`<div class="err"><b>Data belum bisa dimuat.</b><br>${esc(e.message)}<br>Pastikan API_URL di index.html sudah diisi URL Web App dan nama tab sesuai.</div>`;
+  }
+}
+$("cat").addEventListener("change",()=>DATA&&render());
+load(); setInterval(load,REFRESH_MS);
+</script>
+</body>
+</html>
